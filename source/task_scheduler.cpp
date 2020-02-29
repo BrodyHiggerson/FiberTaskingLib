@@ -25,6 +25,7 @@
 #include "ftl/task_scheduler.h"
 
 #include "ftl/atomic_counter.h"
+#include "ftl/thread_abstraction.h"
 
 #if defined(FTL_WIN32_THREADS)
 #	ifndef WIN32_LEAN_AND_MEAN
@@ -47,7 +48,7 @@ struct ThreadStartArgs {
 	unsigned ThreadIndex;
 };
 
-FTL_THREAD_FUNC_RETURN_TYPE TaskScheduler::ThreadStart(void *const arg) {
+FTL_THREAD_FUNC_RETURN_TYPE TaskScheduler::ThreadStartFunc(void *const arg) {
 	auto *const threadArgs = reinterpret_cast<ThreadStartArgs *>(arg);
 	TaskScheduler *taskScheduler = threadArgs->Scheduler;
 	unsigned const index = threadArgs->ThreadIndex;
@@ -76,47 +77,18 @@ FTL_THREAD_FUNC_RETURN_TYPE TaskScheduler::ThreadStart(void *const arg) {
 	FTL_THREAD_FUNC_END;
 }
 
-struct MainFiberStartArgs {
-	TaskFunction MainTask;
-	void *Arg;
+struct ThreadTermArgs {
 	TaskScheduler *Scheduler;
+	Fiber *CurrentFiber;
 };
 
-void TaskScheduler::MainFiberStart(void *const arg) {
-	auto *const mainFiberArgs = reinterpret_cast<MainFiberStartArgs *>(arg);
-	TaskScheduler *taskScheduler = mainFiberArgs->Scheduler;
-
-	// Call the main task procedure
-	mainFiberArgs->MainTask(taskScheduler, mainFiberArgs->Arg);
-
-	// Request that all the threads quit
-	taskScheduler->m_quit.store(true, std::memory_order_release);
-
-	// Signal any waiting threads so they can finish
-	if (taskScheduler->m_emptyQueueBehavior.load(std::memory_order_relaxed) == EmptyQueueBehavior::Sleep) {
-		for (size_t i = 0; i < taskScheduler->m_numThreads; ++i) {
-			{
-				std::unique_lock<std::mutex> lock(taskScheduler->m_tls[i].FailedQueuePopLock);
-				taskScheduler->m_tls[i].FailedQueuePopAttempts = 0;
-			}
-			taskScheduler->m_tls[i].FailedQueuePopCV.notify_all();
-		}
-	}
-
-	// Switch to the thread fibers
-	ThreadLocalStorage &tls = taskScheduler->m_tls[taskScheduler->GetCurrentThreadIndex()];
-	taskScheduler->m_fibers[tls.CurrentFiberIndex].SwitchToFiber(&tls.ThreadFiber);
-
-	// We should never get here
-	printf("Error: FiberStart should never return");
-}
-
-void TaskScheduler::FiberStart(void *const arg) {
+void TaskScheduler::FiberStartFunc(void *const arg) {
 	auto *const taskScheduler = reinterpret_cast<TaskScheduler *>(arg);
 
 	// If we just started from the pool, we may need to clean up from another fiber
 	taskScheduler->CleanUpOldFiber();
 
+	// Process tasks infinitely, until quit
 	while (!taskScheduler->m_quit.load(std::memory_order_acquire)) {
 		// Check if there are any ready fibers
 		size_t waitingFiberIndex = kFTLInvalidIndex;
@@ -208,17 +180,44 @@ void TaskScheduler::FiberStart(void *const arg) {
 
 	// Start the quit sequence
 
-	// Switch to the thread fibers
+	ThreadTermArgs termArgs;
+	Fiber quitFiber(524288, ThreadEndFunc, &termArgs);
+	termArgs.Scheduler = taskScheduler;
+	termArgs.CurrentFiber = &quitFiber;
+
 	ThreadLocalStorage &tls = taskScheduler->m_tls[taskScheduler->GetCurrentThreadIndex()];
-	taskScheduler->m_fibers[tls.CurrentFiberIndex].SwitchToFiber(&tls.ThreadFiber);
+	taskScheduler->m_fibers[tls.CurrentFiberIndex].SwitchToFiber(&quitFiber);
 
 	// We should never get here
 	printf("Error: FiberStart should never return");
 }
 
+void TaskScheduler::ThreadEndFunc(void *arg) {
+	ThreadTermArgs *termArgs = reinterpret_cast<ThreadTermArgs *>(arg);
+
+	// Wait for all other threads to quit
+	termArgs->Scheduler->m_quitCount.fetch_add(1, std::memory_order_seq_cst);
+	while (termArgs->Scheduler->m_quitCount.load(std::memory_order_seq_cst) != termArgs->Scheduler->m_numThreads) {
+		SleepThread(50);
+	}
+
+	// Jump to the thread fibers
+	size_t threadIndex = termArgs->Scheduler->GetCurrentThreadIndex();
+
+	if (threadIndex == 0) {
+		// Special case for the main thread fiber
+		termArgs->CurrentFiber->SwitchToFiber(&termArgs->Scheduler->m_fibers[0]);
+	} else {
+		ThreadLocalStorage &tls = termArgs->Scheduler->m_tls[threadIndex];
+		termArgs->CurrentFiber->SwitchToFiber(&tls.ThreadFiber);
+	}
+}
+
 TaskScheduler::TaskScheduler() {
 	FTL_VALGRIND_HG_DISABLE_CHECKING(&m_initialized, sizeof(m_initialized));
 	FTL_VALGRIND_HG_DISABLE_CHECKING(&m_quit, sizeof(m_quit));
+	FTL_VALGRIND_HG_DISABLE_CHECKING(&m_quitCount, sizeof(m_quitCount));
+	FTL_VALGRIND_HG_DISABLE_CHECKING(&m_mainThreadIsBound, sizeof(m_mainThreadIsBound));
 }
 
 TaskScheduler::~TaskScheduler() {
@@ -227,22 +226,13 @@ TaskScheduler::~TaskScheduler() {
 	delete[] m_tls;
 }
 
-void TaskScheduler::Run(unsigned const fiberPoolSize, TaskFunction const mainTask, void *const mainTaskArg, unsigned const threadPoolSize, EmptyQueueBehavior const behavior) {
+void TaskScheduler::Init(unsigned const fiberPoolSize, unsigned const threadPoolSize, EmptyQueueBehavior const behavior) {
 	// Initialize the flags
 	m_initialized.store(false, std::memory_order::memory_order_release);
 	m_quit.store(false, std::memory_order_release);
-	m_emptyQueueBehavior = behavior;
-
-	// Create and populate the fiber pool
-	m_fiberPoolSize = fiberPoolSize;
-	m_fibers = new Fiber[fiberPoolSize];
-	m_freeFibers = new std::atomic<bool>[fiberPoolSize];
-	FTL_VALGRIND_HG_DISABLE_CHECKING(m_freeFibers, sizeof(std::atomic<bool>) * fiberPoolSize);
-
-	for (unsigned i = 0; i < fiberPoolSize; ++i) {
-		m_fibers[i] = Fiber(512000, FiberStart, this);
-		m_freeFibers[i].store(true, std::memory_order_release);
-	}
+	m_quitCount.store(0, std::memory_order_seq_cst);
+	m_mainThreadIsBound.store(false);
+	m_emptyQueueBehavior.store(behavior);
 
 	if (threadPoolSize == 0) {
 		// 1 thread for each logical processor
@@ -250,6 +240,19 @@ void TaskScheduler::Run(unsigned const fiberPoolSize, TaskFunction const mainTas
 	} else {
 		m_numThreads = threadPoolSize;
 	}
+
+	// Create and populate the fiber pool
+	m_fiberPoolSize = fiberPoolSize;
+	m_fibers = new Fiber[fiberPoolSize];
+	m_freeFibers = new std::atomic<bool>[fiberPoolSize];
+	FTL_VALGRIND_HG_DISABLE_CHECKING(m_freeFibers, sizeof(std::atomic<bool>) * fiberPoolSize);
+
+	// Leave the first slot for the bound main thread
+	for (unsigned i = 1; i < fiberPoolSize; ++i) {
+		m_fibers[i] = Fiber(524288, FiberStartFunc, this);
+		m_freeFibers[i].store(true, std::memory_order_release);
+	}
+	m_freeFibers[0].store(false, std::memory_order_release);
 
 	// Initialize threads and TLS
 	m_threads.resize(m_numThreads);
@@ -262,16 +265,13 @@ void TaskScheduler::Run(unsigned const fiberPoolSize, TaskFunction const mainTas
 #	pragma warning(pop)
 #endif // _MSC_VER
 
-	// Set the properties for the current thread
-	SetCurrentThreadAffinity(0);
-	m_threads[0] = GetCurrentThread();
 #if defined(FTL_WIN32_THREADS)
-	// Set the thread handle to INVALID_HANDLE_VALUE
-	// So we don't incorrectly try to reference it from another thread
-	m_threads[0].Handle = INVALID_HANDLE_VALUE;
+	// Temporarily set the main thread ID to -1, so when the worker threads start up, they don't accidentally use it
+	// I don't know if Windows thread id's can ever be 0, but just in case.
+	m_threads[0].Id = static_cast<DWORD>(-1);
 #endif
 
-	// Create the remaining threads
+	// Create the worker threads
 	for (size_t i = 1; i < m_numThreads; ++i) {
 		auto *const threadArgs = new ThreadStartArgs();
 		threadArgs->Scheduler = this;
@@ -280,7 +280,7 @@ void TaskScheduler::Run(unsigned const fiberPoolSize, TaskFunction const mainTas
 		char threadName[256];
 		snprintf(threadName, sizeof(threadName), "FTL Worker Thread %zu", i);
 
-		if (!CreateThread(524288, ThreadStart, threadArgs, threadName, &m_threads[i])) {
+		if (!CreateThread(524288, ThreadStartFunc, threadArgs, threadName, &m_threads[i])) {
 			printf("Error: Failed to create all the worker threads");
 			return;
 		}
@@ -288,24 +288,37 @@ void TaskScheduler::Run(unsigned const fiberPoolSize, TaskFunction const mainTas
 
 	// Signal the worker threads that we're fully initialized
 	m_initialized.store(true, std::memory_order_release);
+}
 
-	// Start the main task
+void TaskScheduler::Term() {
+	// Request that all the threads quit
+	m_quit.store(true, std::memory_order_release);
 
-	// Get a free fiber
-	size_t const freeFiberIndex = GetNextFreeFiberIndex();
-	Fiber *freeFiber = &m_fibers[freeFiberIndex];
+	// Signal any waiting threads so they can finish
+	if (m_emptyQueueBehavior.load(std::memory_order_relaxed) == EmptyQueueBehavior::Sleep) {
+		for (size_t i = 0; i < m_numThreads; ++i) {
+			{
+				std::unique_lock<std::mutex> lock(m_tls[i].FailedQueuePopLock);
+				m_tls[i].FailedQueuePopAttempts = 0;
+			}
+			m_tls[i].FailedQueuePopCV.notify_all();
+		}
+	}
 
-	// Repurpose it as the main task fiber and switch to it
-	MainFiberStartArgs mainFiberArgs{};
-	mainFiberArgs.Scheduler = this;
-	mainFiberArgs.MainTask = mainTask;
-	mainFiberArgs.Arg = mainTaskArg;
+	// Create and jump to the quit fiber
+	// Create a scope so &tls isn't used after we come back from the switch. It will be wrong if we started on a non-main thread
+	{
+		ThreadTermArgs termArgs;
+		Fiber quitFiber(524288, ThreadEndFunc, &termArgs);
+		termArgs.Scheduler = this;
+		termArgs.CurrentFiber = &quitFiber;
 
-	freeFiber->Reset(MainFiberStart, &mainFiberArgs);
-	m_tls[0].CurrentFiberIndex = freeFiberIndex;
-	m_tls[0].ThreadFiber.SwitchToFiber(freeFiber);
+		ThreadLocalStorage &tls = m_tls[GetCurrentThreadIndex()];
+		m_fibers[tls.CurrentFiberIndex].SwitchToFiber(&quitFiber);
+	}
 
-	// And we're back
+	// We're back. We should be on the main thread now
+
 	// Wait for the worker threads to finish
 	for (size_t i = 1; i < m_numThreads; ++i) {
 		JoinThread(m_threads[i]);
@@ -320,6 +333,32 @@ void TaskScheduler::Run(unsigned const fiberPoolSize, TaskFunction const mainTas
 	m_tls = nullptr;
 
 	m_threads.clear();
+}
+
+bool TaskScheduler::BindThread() {
+	// Sanity check to make sure the user doesn't double bind
+	if (m_mainThreadIsBound.load()) {
+		return false;
+	}
+
+	// Set the properties for the current thread
+	SetCurrentThreadAffinity(0);
+	m_threads[0] = GetCurrentThread();
+#if defined(FTL_WIN32_THREADS)
+	// Set the thread handle to INVALID_HANDLE_VALUE
+	// ::GetCurrentThread is a pseudo handle, that always references the current thread.
+	// Aka, if we tried to use this handle from another thread to reference the main thread,
+	// it would instead reference the other thread. We don't currently use the handle anywhere.
+	// Therefore, we set this to INVALID_HANDLE_VALUE, so any future usages can take this into account
+	// Reported by @rtj
+	m_threads[0].Handle = INVALID_HANDLE_VALUE;
+#endif
+
+	// Set the fiber index
+	m_tls[0].CurrentFiberIndex = 0;
+
+	m_mainThreadIsBound.store(true);
+	return true;
 }
 
 void TaskScheduler::AddTask(Task const task, AtomicCounter *const counter) {

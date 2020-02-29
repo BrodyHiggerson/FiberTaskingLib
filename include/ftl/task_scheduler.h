@@ -86,6 +86,8 @@ private:
 
 	std::atomic<bool> m_initialized{false};
 	std::atomic<bool> m_quit{false};
+	std::atomic<size_t> m_quitCount{0};
+	std::atomic<bool> m_mainThreadIsBound{false};
 
 	std::atomic<EmptyQueueBehavior> m_emptyQueueBehavior{EmptyQueueBehavior::Spin};
 
@@ -174,12 +176,7 @@ private:
 
 public:
 	/**
-	 * Initializes the TaskScheduler and then starts executing 'mainTask'
-	 *
-	 * NOTE: Run will "block" until 'mainTask' returns. However, it doesn't block in the traditional sense; 'mainTask'
-	 * is created as a Fiber. Therefore, the current thread will save it's current state, and then switch execution to
-	 * the the 'mainTask' fiber. When 'mainTask' finishes, the thread will switch back to the saved state, and Run()
-	 * will return.
+	 * Initializes the TaskScheduler
 	 *
 	 * @param fiberPoolSize     The size of the fiber pool. The fiber pool is used to run new tasks when the current task is waiting on a counter
 	 * @param mainTask          The main task to run
@@ -187,7 +184,19 @@ public:
 	 * @param threadPoolSize    The size of the thread pool to run. 0 corresponds to NumHardwareThreads()
 	 * @param behavior          The behavior of the threads after they have no work to do.
 	 */
-	void Run(unsigned fiberPoolSize, TaskFunction mainTask, void *mainTaskArg = nullptr, unsigned threadPoolSize = 0, EmptyQueueBehavior behavior = EmptyQueueBehavior::Spin);
+	void Init(unsigned fiberPoolSize, unsigned threadPoolSize = 0, EmptyQueueBehavior behavior = EmptyQueueBehavior::Spin);
+
+	/**
+	 * Clean up the TaskScheduler
+	 */
+	void Term();
+
+	/**
+	 * Binds the current thread to the scheduler, converting the thread to a Fiber
+	 *
+	 * NOTE: This *must* be called before calling WaitForCounter(), otherwise undefined behavior will happen.
+	 */
+	bool BindThread();
 
 	/**
 	 * Adds a task to the internal queue.
@@ -294,19 +303,21 @@ private:
 	 * @param arg    An instance of ThreadStartArgs
 	 * @return       The return status of the thread
 	 */
-	static FTL_THREAD_FUNC_DECL ThreadStart(void *arg);
-	/**
-	 * The fiberProc function that wraps the main fiber procedure given by the user
-	 *
-	 * @param arg    An instance of TaskScheduler
-	 */
-	static void MainFiberStart(void *arg);
+	static FTL_THREAD_FUNC_DECL ThreadStartFunc(void *arg);
 	/**
 	 * The fiberProc function for all fibers in the fiber pool
 	 *
 	 * @param arg    An instance of TaskScheduler
 	 */
-	static void FiberStart(void *arg);
+	static void FiberStartFunc(void *arg);
+	/**
+	 * The fiberProc function that fibers will jump to when Term() is called
+	 * This allows us to jump back to the worker thread original stacks and clean up
+	 * In addition, this allows the "main thread" to jump back to the "main thread" stack
+	 *
+	 * @param arg    An instance of ThreadTermArgs struct
+	 */
+	static void ThreadEndFunc(void *arg);
 };
 
 } // End of namespace ftl
