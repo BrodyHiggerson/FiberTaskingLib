@@ -306,13 +306,13 @@ void TaskScheduler::Term() {
 	}
 
 	// Create and jump to the quit fiber
+	ThreadTermArgs termArgs;
+	Fiber quitFiber(524288, ThreadEndFunc, &termArgs);
+	termArgs.Scheduler = this;
+	termArgs.CurrentFiber = &quitFiber;
+
 	// Create a scope so &tls isn't used after we come back from the switch. It will be wrong if we started on a non-main thread
 	{
-		ThreadTermArgs termArgs;
-		Fiber quitFiber(524288, ThreadEndFunc, &termArgs);
-		termArgs.Scheduler = this;
-		termArgs.CurrentFiber = &quitFiber;
-
 		ThreadLocalStorage &tls = m_tls[GetCurrentThreadIndex()];
 		m_fibers[tls.CurrentFiberIndex].SwitchToFiber(&quitFiber);
 	}
