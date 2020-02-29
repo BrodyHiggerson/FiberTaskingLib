@@ -72,7 +72,7 @@ private:
 	constexpr static size_t kFTLInvalidIndex = std::numeric_limits<size_t>::max();
 
 	size_t m_numThreads{0};
-	std::vector<ThreadType> m_threads;
+	ThreadType *m_threads;
 
 	size_t m_fiberPoolSize{0};
 	/* The backing storage for the fiber pool */
@@ -242,7 +242,7 @@ public:
 	 * @return    Backing thread count
 	 */
 	size_t GetThreadCount() const noexcept {
-		return m_threads.size();
+		return m_numThreads;
 	}
 
 	/**

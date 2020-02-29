@@ -255,7 +255,7 @@ void TaskScheduler::Init(unsigned const fiberPoolSize, unsigned const threadPool
 	m_freeFibers[0].store(false, std::memory_order_release);
 
 	// Initialize threads and TLS
-	m_threads.resize(m_numThreads);
+	m_threads = new ThreadType[m_numThreads];
 #ifdef _MSC_VER
 #	pragma warning(push)
 #	pragma warning(disable : 4316) // I know this won't be allocated to the right alignment, this is okay as we're using alignment for padding.
@@ -331,8 +331,14 @@ void TaskScheduler::Term() {
 	m_freeFibers = nullptr;
 	delete[] m_tls;
 	m_tls = nullptr;
+	delete[] m_threads;
+	m_threads = nullptr;
 
-	m_threads.clear();
+	m_mainThreadIsBound.store(false);
+	m_quitCount.store(0);
+	m_quit.store(false);
+	m_initialized.store(false);
+	m_numThreads = 0;
 }
 
 bool TaskScheduler::BindThread() {
