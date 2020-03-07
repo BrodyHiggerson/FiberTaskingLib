@@ -54,8 +54,7 @@ void SideEffect(ftl::TaskScheduler *scheduler, void * /*arg*/) {
 // NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 TEST(FunctionalTests, ThreadLocal) {
 	ftl::TaskScheduler taskScheduler;
-	taskScheduler.Init(400);
-	ASSERT_TRUE(taskScheduler.BindThread());
+	GTEST_ASSERT_EQ(taskScheduler.Init(), 0);
 
 	// Single Init
 	std::vector<ftl::Task> singleInitTask(taskScheduler.GetThreadCount(), ftl::Task{SimpleInit, nullptr});
@@ -82,7 +81,4 @@ TEST(FunctionalTests, ThreadLocal) {
 	ASSERT_GE(g_sideEffectCount, 1);
 	// The count minus one should be the greatest value within the TLS.
 	ASSERT_EQ(g_sideEffectCount - 1, *std::max_element(sideEffect.begin(), sideEffect.end()));
-
-	// Cleanup
-	taskScheduler.Term();
 }

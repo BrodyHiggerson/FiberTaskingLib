@@ -42,6 +42,8 @@
 namespace ftl {
 
 constexpr static size_t kFailedPopAttemptsHeuristic = 5;
+constexpr static int kInitErrorDoubleCall = -30;
+constexpr static int kInitErrorFailedToCreateWorkerThread = -60;
 
 struct ThreadStartArgs {
 	TaskScheduler *Scheduler;
@@ -220,35 +222,30 @@ TaskScheduler::TaskScheduler() {
 	FTL_VALGRIND_HG_DISABLE_CHECKING(&m_mainThreadIsBound, sizeof(m_mainThreadIsBound));
 }
 
-TaskScheduler::~TaskScheduler() {
-	delete[] m_fibers;
-	delete[] m_freeFibers;
-	delete[] m_tls;
-}
+int TaskScheduler::Init(TaskSchedulerInitOptions options) {
+	// Sanity check to make sure the user doesn't double init
+	if (m_initialized.load()) {
+		return kInitErrorDoubleCall;
+	}
 
-void TaskScheduler::Init(unsigned const fiberPoolSize, unsigned const threadPoolSize, EmptyQueueBehavior const behavior) {
 	// Initialize the flags
-	m_initialized.store(false, std::memory_order::memory_order_release);
-	m_quit.store(false, std::memory_order_release);
-	m_quitCount.store(0, std::memory_order_seq_cst);
-	m_mainThreadIsBound.store(false);
-	m_emptyQueueBehavior.store(behavior);
+	m_emptyQueueBehavior.store(options.Behavior);
 
-	if (threadPoolSize == 0) {
+	if (options.ThreadPoolSize == 0) {
 		// 1 thread for each logical processor
 		m_numThreads = GetNumHardwareThreads();
 	} else {
-		m_numThreads = threadPoolSize;
+		m_numThreads = options.ThreadPoolSize;
 	}
 
 	// Create and populate the fiber pool
-	m_fiberPoolSize = fiberPoolSize;
-	m_fibers = new Fiber[fiberPoolSize];
-	m_freeFibers = new std::atomic<bool>[fiberPoolSize];
+	m_fiberPoolSize = options.FiberPoolSize;
+	m_fibers = new Fiber[options.FiberPoolSize];
+	m_freeFibers = new std::atomic<bool>[options.FiberPoolSize];
 	FTL_VALGRIND_HG_DISABLE_CHECKING(m_freeFibers, sizeof(std::atomic<bool>) * fiberPoolSize);
 
 	// Leave the first slot for the bound main thread
-	for (unsigned i = 1; i < fiberPoolSize; ++i) {
+	for (unsigned i = 1; i < options.FiberPoolSize; ++i) {
 		m_fibers[i] = Fiber(524288, FiberStartFunc, this);
 		m_freeFibers[i].store(true, std::memory_order_release);
 	}
@@ -271,6 +268,22 @@ void TaskScheduler::Init(unsigned const fiberPoolSize, unsigned const threadPool
 	m_threads[0].Id = static_cast<DWORD>(-1);
 #endif
 
+	// Set the properties for the current thread
+	SetCurrentThreadAffinity(0);
+	m_threads[0] = GetCurrentThread();
+#if defined(FTL_WIN32_THREADS)
+	// Set the thread handle to INVALID_HANDLE_VALUE
+	// ::GetCurrentThread is a pseudo handle, that always references the current thread.
+	// Aka, if we tried to use this handle from another thread to reference the main thread,
+	// it would instead reference the other thread. We don't currently use the handle anywhere.
+	// Therefore, we set this to INVALID_HANDLE_VALUE, so any future usages can take this into account
+	// Reported by @rtj
+	m_threads[0].Handle = INVALID_HANDLE_VALUE;
+#endif
+
+	// Set the fiber index
+	m_tls[0].CurrentFiberIndex = 0;
+
 	// Create the worker threads
 	for (size_t i = 1; i < m_numThreads; ++i) {
 		auto *const threadArgs = new ThreadStartArgs();
@@ -281,16 +294,17 @@ void TaskScheduler::Init(unsigned const fiberPoolSize, unsigned const threadPool
 		snprintf(threadName, sizeof(threadName), "FTL Worker Thread %zu", i);
 
 		if (!CreateThread(524288, ThreadStartFunc, threadArgs, threadName, &m_threads[i])) {
-			printf("Error: Failed to create all the worker threads");
-			return;
+			return kInitErrorFailedToCreateWorkerThread;
 		}
 	}
 
 	// Signal the worker threads that we're fully initialized
 	m_initialized.store(true, std::memory_order_release);
+
+	return 0;
 }
 
-void TaskScheduler::Term() {
+TaskScheduler::~TaskScheduler() {
 	// Request that all the threads quit
 	m_quit.store(true, std::memory_order_release);
 
@@ -326,45 +340,9 @@ void TaskScheduler::Term() {
 
 	// Cleanup
 	delete[] m_fibers;
-	m_fibers = nullptr;
 	delete[] m_freeFibers;
-	m_freeFibers = nullptr;
 	delete[] m_tls;
-	m_tls = nullptr;
 	delete[] m_threads;
-	m_threads = nullptr;
-
-	m_mainThreadIsBound.store(false);
-	m_quitCount.store(0);
-	m_quit.store(false);
-	m_initialized.store(false);
-	m_numThreads = 0;
-}
-
-bool TaskScheduler::BindThread() {
-	// Sanity check to make sure the user doesn't double bind
-	if (m_mainThreadIsBound.load()) {
-		return false;
-	}
-
-	// Set the properties for the current thread
-	SetCurrentThreadAffinity(0);
-	m_threads[0] = GetCurrentThread();
-#if defined(FTL_WIN32_THREADS)
-	// Set the thread handle to INVALID_HANDLE_VALUE
-	// ::GetCurrentThread is a pseudo handle, that always references the current thread.
-	// Aka, if we tried to use this handle from another thread to reference the main thread,
-	// it would instead reference the other thread. We don't currently use the handle anywhere.
-	// Therefore, we set this to INVALID_HANDLE_VALUE, so any future usages can take this into account
-	// Reported by @rtj
-	m_threads[0].Handle = INVALID_HANDLE_VALUE;
-#endif
-
-	// Set the fiber index
-	m_tls[0].CurrentFiberIndex = 0;
-
-	m_mainThreadIsBound.store(true);
-	return true;
 }
 
 void TaskScheduler::AddTask(Task const task, AtomicCounter *const counter) {

@@ -65,8 +65,7 @@ void InfiniteSpinLockGuardTest(ftl::TaskScheduler * /*scheduler*/, void *arg) {
 // NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 TEST(FunctionalTests, LockingTests) {
 	ftl::TaskScheduler taskScheduler;
-	taskScheduler.Init(400, 0, ftl::EmptyQueueBehavior::Yield);
-	ASSERT_TRUE(taskScheduler.BindThread());
+	GTEST_ASSERT_EQ(taskScheduler.Init(ftl::TaskSchedulerInitOptions{400, 0, ftl::EmptyQueueBehavior::Yield}), 0);
 
 	MutexData md(&taskScheduler);
 
@@ -89,7 +88,4 @@ TEST(FunctionalTests, LockingTests) {
 	for (unsigned i = 0; i < md.Counter; ++i) {
 		GTEST_ASSERT_EQ(md.Queue[i], i);
 	}
-
-	// Cleanup
-	taskScheduler.Term();
 }

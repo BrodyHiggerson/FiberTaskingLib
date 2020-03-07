@@ -51,8 +51,7 @@ void Producer(ftl::TaskScheduler *taskScheduler, void *arg) {
 
 NONIUS_BENCHMARK("ProducerConsumer", [](nonius::chronometer meter) {
 	ftl::TaskScheduler taskScheduler;
-	taskScheduler.Init(kNumProducerTasks + 20);
-	taskScheduler.BindThread();
+	taskScheduler.Init(ftl::TaskSchedulerInitOptions{kNumProducerTasks + 20});
 
 	auto *tasks = new ftl::Task[kNumProducerTasks];
 	for (unsigned i = 0; i < kNumProducerTasks; ++i) {
@@ -69,6 +68,5 @@ NONIUS_BENCHMARK("ProducerConsumer", [](nonius::chronometer meter) {
 	});
 
 	// Cleanup
-	taskScheduler.Term();
 	delete[] tasks;
 })

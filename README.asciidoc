@@ -55,8 +55,7 @@ void AddNumberSubset(ftl::TaskScheduler *taskScheduler, void *arg) {
 int main(int argc, char *argv) {
 	// Create the task scheduler and bind the main thread to it
 	ftl::TaskScheduler taskScheduler;
-	taskScheduler.Init(25);
-	taskScheduler.BindThread();
+	taskScheduler.Init();
 
 	// Define the constants to test
 	constexpr uint64_t triangleNum = 47593243ull;
@@ -107,8 +106,8 @@ int main(int argc, char *argv) {
 	delete[] subsets;
 	delete[] tasks;
 
-	// Unbind the main thread and shut the taskScheduler down
-	taskScheduler.Term();
+	// The destructor of TaskScheduler will shut down all the worker threads
+	// and unbind the main thread
 
 	return 0;
 }

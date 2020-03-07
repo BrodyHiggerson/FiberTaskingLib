@@ -61,8 +61,7 @@ void AddNumberSubset(ftl::TaskScheduler * /*scheduler*/, void *arg) {
 // NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 TEST(FunctionalTests, CalcTriangleNum) {
 	ftl::TaskScheduler taskScheduler;
-	taskScheduler.Init(400);
-	ASSERT_TRUE(taskScheduler.BindThread());
+	GTEST_ASSERT_EQ(taskScheduler.Init(), 0);
 
 	// Define the constants to test
 	const uint64_t triangleNum = 47593243ULL;
@@ -106,6 +105,5 @@ TEST(FunctionalTests, CalcTriangleNum) {
 	GTEST_ASSERT_EQ(triangleNum * (triangleNum + 1ULL) / 2ULL, result);
 
 	// Cleanup
-	taskScheduler.Term();
 	delete[] subsets;
 }
