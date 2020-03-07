@@ -51,7 +51,9 @@ void Producer(ftl::TaskScheduler *taskScheduler, void *arg) {
 
 NONIUS_BENCHMARK("ProducerConsumer", [](nonius::chronometer meter) {
 	ftl::TaskScheduler taskScheduler;
-	taskScheduler.Init(ftl::TaskSchedulerInitOptions{kNumProducerTasks + 20});
+	ftl::TaskSchedulerInitOptions options;
+	options.ThreadPoolSize = kNumProducerTasks + 20;
+	taskScheduler.Init(options);
 
 	auto *tasks = new ftl::Task[kNumProducerTasks];
 	for (unsigned i = 0; i < kNumProducerTasks; ++i) {

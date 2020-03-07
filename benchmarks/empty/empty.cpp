@@ -37,7 +37,7 @@ void EmptyBenchmarkTask(ftl::TaskScheduler * /*scheduler*/, void * /*arg*/) {
 
 NONIUS_BENCHMARK("Empty", [](nonius::chronometer meter) {
 	ftl::TaskScheduler taskScheduler;
-	taskScheduler.Init(ftl::TaskSchedulerInitOptions{20});
+	taskScheduler.Init();
 
 	auto *tasks = new ftl::Task[kNumTasks];
 	for (unsigned i = 0; i < kNumTasks; ++i) {
