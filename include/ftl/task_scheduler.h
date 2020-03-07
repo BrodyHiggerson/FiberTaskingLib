@@ -93,6 +93,8 @@ private:
 	 */
 	std::atomic<bool> *m_freeFibers{nullptr};
 
+	Fiber *m_quitFibers{nullptr};
+
 	std::atomic<bool> m_initialized{false};
 	std::atomic<bool> m_quit{false};
 	std::atomic<size_t> m_quitCount{0};

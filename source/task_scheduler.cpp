@@ -79,13 +79,8 @@ FTL_THREAD_FUNC_RETURN_TYPE TaskScheduler::ThreadStartFunc(void *const arg) {
 	FTL_THREAD_FUNC_END;
 }
 
-struct ThreadTermArgs {
-	TaskScheduler *Scheduler;
-	Fiber *CurrentFiber;
-};
-
 void TaskScheduler::FiberStartFunc(void *const arg) {
-	auto *const taskScheduler = reinterpret_cast<TaskScheduler *>(arg);
+	TaskScheduler *taskScheduler = reinterpret_cast<TaskScheduler *>(arg);
 
 	// If we just started from the pool, we may need to clean up from another fiber
 	taskScheduler->CleanUpOldFiber();
@@ -180,39 +175,35 @@ void TaskScheduler::FiberStartFunc(void *const arg) {
 		}
 	}
 
-	// Start the quit sequence
-
-	ThreadTermArgs termArgs;
-	Fiber quitFiber(524288, ThreadEndFunc, &termArgs);
-	termArgs.Scheduler = taskScheduler;
-	termArgs.CurrentFiber = &quitFiber;
-
-	ThreadLocalStorage &tls = taskScheduler->m_tls[taskScheduler->GetCurrentThreadIndex()];
-	taskScheduler->m_fibers[tls.CurrentFiberIndex].SwitchToFiber(&quitFiber);
+	// Switch to the quit fibers
+	size_t index = taskScheduler->GetCurrentThreadIndex();
+	taskScheduler->m_fibers[taskScheduler->m_tls[index].CurrentFiberIndex].SwitchToFiber(&taskScheduler->m_quitFibers[index]);
 
 	// We should never get here
 	printf("Error: FiberStart should never return");
 }
 
 void TaskScheduler::ThreadEndFunc(void *arg) {
-	ThreadTermArgs *termArgs = reinterpret_cast<ThreadTermArgs *>(arg);
+	TaskScheduler *taskScheduler = reinterpret_cast<TaskScheduler *>(arg);
 
 	// Wait for all other threads to quit
-	termArgs->Scheduler->m_quitCount.fetch_add(1, std::memory_order_seq_cst);
-	while (termArgs->Scheduler->m_quitCount.load(std::memory_order_seq_cst) != termArgs->Scheduler->m_numThreads) {
+	taskScheduler->m_quitCount.fetch_add(1, std::memory_order_seq_cst);
+	while (taskScheduler->m_quitCount.load(std::memory_order_seq_cst) != taskScheduler->m_numThreads) {
 		SleepThread(50);
 	}
 
 	// Jump to the thread fibers
-	size_t threadIndex = termArgs->Scheduler->GetCurrentThreadIndex();
+	size_t threadIndex = taskScheduler->GetCurrentThreadIndex();
 
 	if (threadIndex == 0) {
 		// Special case for the main thread fiber
-		termArgs->CurrentFiber->SwitchToFiber(&termArgs->Scheduler->m_fibers[0]);
+		taskScheduler->m_quitFibers[threadIndex].SwitchToFiber(&taskScheduler->m_fibers[0]);
 	} else {
-		ThreadLocalStorage &tls = termArgs->Scheduler->m_tls[threadIndex];
-		termArgs->CurrentFiber->SwitchToFiber(&tls.ThreadFiber);
+		taskScheduler->m_quitFibers[threadIndex].SwitchToFiber(&taskScheduler->m_tls[threadIndex].ThreadFiber);
 	}
+
+	// We should never get here
+	printf("Error: ThreadEndFunc should never return");
 }
 
 TaskScheduler::TaskScheduler() {
@@ -305,6 +296,12 @@ int TaskScheduler::Init(TaskSchedulerInitOptions options) {
 }
 
 TaskScheduler::~TaskScheduler() {
+	// Create the quit fibers
+	m_quitFibers = new Fiber[m_numThreads];
+	for (size_t i = 0; i < m_numThreads; ++i) {
+		m_quitFibers[i] = Fiber(524288, ThreadEndFunc, this);
+	}
+
 	// Request that all the threads quit
 	m_quit.store(true, std::memory_order_release);
 
@@ -319,16 +316,11 @@ TaskScheduler::~TaskScheduler() {
 		}
 	}
 
-	// Create and jump to the quit fiber
-	ThreadTermArgs termArgs;
-	Fiber quitFiber(524288, ThreadEndFunc, &termArgs);
-	termArgs.Scheduler = this;
-	termArgs.CurrentFiber = &quitFiber;
-
-	// Create a scope so &tls isn't used after we come back from the switch. It will be wrong if we started on a non-main thread
+	// Jump to the quit fiber
+	// Create a scope so index isn't used after we come back from the switch. It will be wrong if we started on a non-main thread
 	{
-		ThreadLocalStorage &tls = m_tls[GetCurrentThreadIndex()];
-		m_fibers[tls.CurrentFiberIndex].SwitchToFiber(&quitFiber);
+		size_t index = GetCurrentThreadIndex();
+		m_fibers[m_tls[index].CurrentFiberIndex].SwitchToFiber(&m_quitFibers[index]);
 	}
 
 	// We're back. We should be on the main thread now
@@ -343,6 +335,8 @@ TaskScheduler::~TaskScheduler() {
 	delete[] m_freeFibers;
 	delete[] m_tls;
 	delete[] m_threads;
+
+	delete[] m_quitFibers;
 }
 
 void TaskScheduler::AddTask(Task const task, AtomicCounter *const counter) {
